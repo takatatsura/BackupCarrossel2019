@@ -1,0 +1,492 @@
+#define NUM_ROBO 0
+//#define NUM_ROBO 1
+//#define NUM_ROBO 2
+
+#include <SPI.h>
+#include "API.h"
+#include "nRF24L01.h"
+
+//***************************************************
+#define TX_ADR_WIDTH    5   // 5 bytes TX(RX) address width
+#define TX_PLOAD_WIDTH  9   // 9 bytes TX payload
+#define PWM_MOTOR_ESQ 5
+#define DIRECAO_PWM_MOTOR_ESQ_A 6
+#define DIRECAO_PWM_MOTOR_ESQ_B 7
+#define DIRECAO_PWM_MOTOR_DIR_A 8
+#define DIRECAO_PWM_MOTOR_DIR_B 9
+#define PWM_MOTOR_DIR 10
+
+#define ODOMETRIA_ESQ A0
+#define ODOMETRIA_DIR A1
+#define TESTE_ODOMETRIA_ESQ A2
+#define TESTE_ODOMETRIA_DIR A3
+byte contOdoEsq = 0;//contador de pulsos, zerado a cada inicio de contagem (a cada novo comando)
+byte contOdoDir = 0;
+char ultContagemOdoEsq = 0;//ultima contagem desde a ultima medida
+char ultContagemOdoDir = 0;
+
+byte TX_ADDRESS[TX_ADR_WIDTH] = { 0x34, 0x43, 0x10, 0x10, 0x01 }; // Define a static TX address
+
+byte rx_buf[TX_PLOAD_WIDTH];
+byte tx_buf[TX_PLOAD_WIDTH] = {0xff};
+//***************************************************
+    byte	kp[8]={1, 16,  7,  6,  5,  4,  3,  3},
+		ki[8]={1, 2,  2,  2,  2,  2,  2,  2},
+		kd[8]={1, 2,  0,  0,  0,  0,  0,  0},
+		kr[8]={1, 8,  8,  8,  8,  8,  8,  8},	// relacao entre as rodas
+		kv[8]={0, 25, 40, 80, 90,110,115,120};	// integral inicial
+    byte	vOdo[]={0, 3, 6, 9, 12, 16, 19, 22};
+//***************************************************
+void setup() {
+  Serial.begin(115200);
+  pinMode(CE, OUTPUT);
+  pinMode(CSN, OUTPUT);
+  pinMode(IRQ, INPUT);
+  SPI.begin();
+  delay(50);
+  init_io();                        // Initialize IO port
+  byte sstatus = SPI_Read(STATUS);
+  Serial.println("* RX_Mode Start *");
+  Serial.print("status = ");
+  Serial.println(sstatus, HEX);     // There is read the mode’s status register, the default value should be ‘E’
+  RX_Mode();                        // set RX mode
+
+  pinMode(PWM_MOTOR_ESQ, OUTPUT);
+  pinMode(DIRECAO_PWM_MOTOR_ESQ_A, OUTPUT);
+  pinMode(DIRECAO_PWM_MOTOR_ESQ_B, OUTPUT);
+  pinMode(DIRECAO_PWM_MOTOR_DIR_A, OUTPUT);
+  pinMode(DIRECAO_PWM_MOTOR_DIR_B, OUTPUT);
+  pinMode(PWM_MOTOR_DIR, OUTPUT);
+  pinMode(ODOMETRIA_ESQ, INPUT);
+  pinMode(ODOMETRIA_DIR, INPUT);
+  pinMode(TESTE_ODOMETRIA_ESQ, OUTPUT);
+  pinMode(TESTE_ODOMETRIA_DIR, OUTPUT);
+}
+
+boolean dirEsq = false, dirDir = false;
+byte velBaseEsq, vBaseDir;
+byte vBaseEsq, velBaseDir;
+int erroAntEsq , erroAntDir;
+int erroEsq = 0, erroDir = 0;
+int difRodas, difRodasEsq, difRodasDir;
+int vMax, velEsq, velDir;
+
+void loop() {
+  for (;;) {
+    byte status = SPI_Read(STATUS);                         // read register STATUS's value    
+    if (dadosComunicacao()) {                                         // se verdadeiro, chegou dados e estao em rx_buf
+      if (rx_buf[0] == 0x80) {
+        
+        velBaseEsq = rx_buf[NUM_ROBO*2+1] >> 4;
+        velBaseDir = rx_buf[NUM_ROBO*2+2] >> 4;
+        
+        dirEsq = velBaseEsq & 0x08;
+        dirDir = velBaseDir & 0x08;
+        vBaseEsq = velBaseEsq & 0x07;
+        vBaseDir = velBaseDir & 0x07;
+        
+        erroAntEsq = erroEsq;
+        erroAntDir = erroDir;
+        
+        erroEsq = (int)vOdo[vBaseEsq]-ultContagemOdoEsq;
+        erroDir = (int)vOdo[vBaseDir]-ultContagemOdoDir;
+        
+        Serial.print("a ");
+        Serial.print((int)erroEsq);
+        
+        tx_buf[5] = erroEsq;
+        tx_buf[6] = erroDir;        
+        tx_buf[7] = velBaseEsq;
+        tx_buf[8] = velBaseEsq;
+        
+        difRodas=((int)vBaseEsq*ultContagemOdoDir-(int)vBaseDir*ultContagemOdoEsq)*16;
+        
+        difRodasDir = -difRodas/kr[vBaseDir];
+        difRodasEsq =  difRodas/kr[vBaseEsq];
+        
+        if (vBaseEsq>=vBaseDir) {trocar com o if de baixo
+          //if (difRodasEsq<0)
+            erroEsq+=difRodasEsq;
+        }
+        if (vBaseEsq<=vBaseDir) {
+          //if (difRodasDir<0)
+            erroDir+=difRodasDir;
+        }
+        
+        //intEsq=(intEsq+erroEsq)/2;
+        //intDir=(intDir+erroDir)/2;
+
+        velEsq=(int)kp[vBaseEsq]*erroEsq
+        //+ ki[vBaseEsq]*intEsq
+        //+ kd[vBaseEsq]*(erroEsq-erroAntEsq)
+        ;
+
+        velDir=(int)kp[vBaseDir]*erroDir
+        //+ ki[vBaseDir]*intDir
+        + kd[vBaseDir]*(erroDir-erroAntDir)
+        ;
+
+        Serial.print("b ");
+        Serial.print(velEsq);
+
+        velEsq+=kv[vBaseEsq];
+        velDir+=kv[vBaseDir];
+        
+        if (velEsq<0) {
+          velEsq = -velEsq;
+          dirEsq = !dirEsq;
+          velEsq = 0;
+        }
+        if (velDir<0) {
+          velDir = -velDir;
+          dirDir = !dirDir;
+          velDir = 0;
+        }
+        
+        Serial.print("c ");
+        Serial.print(velEsq);
+        Serial.print("d ");
+        Serial.print(vBaseEsq);
+       
+        /*Serial.print("E:");
+        Serial.print(tx_buf[1]);
+        Serial.print("D:");
+        Serial.print(tx_buf[2]);*/
+        
+        vMax = max(velEsq, velDir);
+        if (vMax>250) {
+          velEsq = 250*(unsigned)velEsq/vMax;
+          velDir = 250*(unsigned)velDir/vMax;
+        }
+                
+        analogWrite(PWM_MOTOR_ESQ, velEsq);
+        if (dirEsq) {
+          digitalWrite(DIRECAO_PWM_MOTOR_ESQ_A, HIGH);
+          digitalWrite(DIRECAO_PWM_MOTOR_ESQ_B, LOW);
+        } else {
+          digitalWrite(DIRECAO_PWM_MOTOR_ESQ_A, LOW);
+          digitalWrite(DIRECAO_PWM_MOTOR_ESQ_B, HIGH);
+        }
+
+        if (vBaseDir!=0) {
+          analogWrite(PWM_MOTOR_DIR, velDir);
+          if (dirDir) {
+            digitalWrite(DIRECAO_PWM_MOTOR_DIR_A, HIGH);
+            digitalWrite(DIRECAO_PWM_MOTOR_DIR_B, LOW);
+          } else {
+            digitalWrite(DIRECAO_PWM_MOTOR_DIR_A, LOW);
+            digitalWrite(DIRECAO_PWM_MOTOR_DIR_B, HIGH);
+          }
+        } else {
+          analogWrite(PWM_MOTOR_DIR, 0);
+          digitalWrite(DIRECAO_PWM_MOTOR_DIR_A, HIGH);
+          digitalWrite(DIRECAO_PWM_MOTOR_DIR_B, HIGH);
+        }
+        
+        /*Serial.print(" E:");
+        Serial.print(velEsq);
+        Serial.print("D:");
+        Serial.print(velDir);*/
+        tx_buf[3] = velEsq;
+        tx_buf[4] = velDir;
+        
+        /*
+        analogWrite(PWM_MOTOR_ESQ, (rx_buf[NUM_ROBO + 1] & 0x7f) << 1);
+        if (rx_buf[NUM_ROBO + 1] & 0x80) {
+          digitalWrite(DIRECAO_PWM_MOTOR_ESQ_A, HIGH);
+          digitalWrite(DIRECAO_PWM_MOTOR_ESQ_B, LOW);
+        } else {
+          digitalWrite(DIRECAO_PWM_MOTOR_ESQ_A, LOW);
+          digitalWrite(DIRECAO_PWM_MOTOR_ESQ_B, HIGH);
+        }
+
+        analogWrite(PWM_MOTOR_DIR, (rx_buf[NUM_ROBO + 2] & 0x7f) << 1);
+        if (rx_buf[NUM_ROBO + 2] & 0x80) {
+          digitalWrite(DIRECAO_PWM_MOTOR_DIR_A, HIGH);
+          digitalWrite(DIRECAO_PWM_MOTOR_DIR_B, LOW);
+        } else {
+          digitalWrite(DIRECAO_PWM_MOTOR_DIR_A, LOW);
+          digitalWrite(DIRECAO_PWM_MOTOR_DIR_B, HIGH);
+        }
+        */
+      }
+      /*for (int i = 0; i < 3; i++) {
+        Serial.print(" ");
+        Serial.print(rx_buf[i], HEX);                              // print rx_buf
+      }
+      Serial.println(" ");*/
+    }
+    SPI_RW_Reg(WRITE_REG + STATUS, status);                             // clear RX_DR or TX_DS or MAX_RT interrupt flag
+
+    verificaOdoEsq();
+    verificaOdoDir();
+  }
+}
+
+boolean dadosComunicacao() {
+  byte sstatus = SPI_Read(STATUS);                         // read register STATUS's value
+  if (sstatus & RX_DR) {     
+    tx_buf[1] = ultContagemOdoEsq = contOdoEsq;
+    contOdoEsq = 0;
+    tx_buf[2] = ultContagemOdoDir = contOdoDir;
+    contOdoDir = 0;
+    //SPI_RW_Reg(FLUSH_TX, 0);
+    SPI_Write_Buf(W_ACK_PAYLOAD, tx_buf, TX_PLOAD_WIDTH);             //W_ACK_PAYLOAD
+    for (int i = 0; i < TX_PLOAD_WIDTH; i++) {
+        Serial.print(" ");
+        Serial.print(tx_buf[i]);                              // print rx_buf
+      }
+      Serial.println(" ");                                           // if receive data ready (TX_DS) interrupt
+    SPI_Read_Buf(RD_RX_PLOAD, rx_buf, TX_PLOAD_WIDTH);             // read playload to rx_buf
+    SPI_RW_Reg(FLUSH_RX, 0);
+  }
+  SPI_RW_Reg(WRITE_REG + STATUS, sstatus);                     // clear RX_DR or TX_DS or MAX_RT interrupt flag
+  return sstatus & RX_DR;
+}
+
+const int VARIACAO_IGNORAVEL = 100;
+
+void verificaOdoEsq() {
+  static boolean subindo = true;
+  static unsigned long tempoInicio = 0;
+  static unsigned long tempoMudancaFutura = 0;
+  static int valMin = 0;
+  static int valMax = 0;
+
+  int valAtual = analogRead(ODOMETRIA_ESQ);
+
+  unsigned long tempoAtual = millis();
+  if (tempoMudancaFutura != 0)
+    if (tempoAtual >= tempoMudancaFutura) {
+      tempoMudancaFutura = 0;
+      contOdoEsq++;
+      digitalWrite(TESTE_ODOMETRIA_ESQ, LOW);
+    }
+  if (subindo) {
+    if (valAtual > valMax)
+      valMax = valAtual;
+    else if (valMax - valAtual > VARIACAO_IGNORAVEL) {
+      subindo = false;
+      valMin = valMax;
+      goto contagem;
+    }
+  } else {
+    if (valAtual < valMin)
+      valMin = valAtual;
+    else if (valAtual - valMin > VARIACAO_IGNORAVEL) {
+      subindo = true;
+      valMax = valMin;
+      goto contagem;
+    }
+  }
+  return;
+  contagem: {                     //contagem que ocorre apenas quando o tempo medio do meio ciclo anterior é maior que o meio ciclo atual
+    contOdoEsq++;
+    digitalWrite(TESTE_ODOMETRIA_ESQ, HIGH);
+    if (tempoMudancaFutura != 0) {                     // se a contagem pelo tempo ainda nao foi feita e o meio ciclo ja acabou (meio ciclo muito menor que anterior), conta
+      contOdoEsq++;
+      digitalWrite(TESTE_ODOMETRIA_ESQ, LOW);
+    }
+    tempoMudancaFutura = tempoAtual + (tempoAtual - tempoInicio) / 2;
+    tempoInicio = tempoAtual;
+  }
+  return;
+}
+
+void verificaOdoDir() {
+  static boolean subindo = true;
+  static unsigned long tempoInicio = 0;
+  static unsigned long tempoMudancaFutura = 0;
+  static int valMin = 0;
+  static int valMax = 0;
+
+  int valAtual = analogRead(ODOMETRIA_DIR);
+
+  unsigned long tempoAtual = millis();
+  if (tempoMudancaFutura != 0)
+    if (tempoAtual >= tempoMudancaFutura) {
+      tempoMudancaFutura = 0;
+      contOdoDir++;
+      digitalWrite(TESTE_ODOMETRIA_DIR, LOW);
+    }
+  if (subindo) {
+    if (valAtual > valMax)
+      valMax = valAtual;
+    else if (valMax - valAtual > VARIACAO_IGNORAVEL) {
+      subindo = false;
+      valMin = valMax;
+      goto contagem;
+    }
+  } else {
+    if (valAtual < valMin)
+      valMin = valAtual;
+    else if (valAtual - valMin > VARIACAO_IGNORAVEL) {
+      subindo = true;
+      valMax = valMin;
+      goto contagem;
+    }
+  }
+  return;
+  contagem: {                     //contagem que ocorre apenas quando o tempo medio do meio ciclo anterior é maior que o meio ciclo atual
+    contOdoDir++;
+    digitalWrite(TESTE_ODOMETRIA_DIR, HIGH);
+    if (tempoMudancaFutura != 0) {                     // se a contagem pelo tempo ainda nao foi feita e o meio ciclo ja acabou (meio ciclo muito menor que anterior), conta
+      contOdoDir++;
+      digitalWrite(TESTE_ODOMETRIA_DIR, LOW);
+    }
+    tempoMudancaFutura = tempoAtual + (tempoAtual - tempoInicio) / 2;
+    tempoInicio = tempoAtual;
+  }
+  return;
+}
+
+//**** a partir daqui vem o cdigo do SPI + tranceptor *****
+/*********************************************************************
+ **  Device:  nRF24L01+                                              **
+ **  File:   EF_nRF24L01_RX.c                                        **
+ **                                                                  **
+ **                                                                  **
+ **  Copyright (C) 2011 ElecFraks.                                   **
+ **  This example code is in the public domain.                      **
+ **                                                                  **
+ **  Description:                                                    **
+ **  This file is a sample code for your reference.                  **
+ **  It's the v1.0 nRF24L01+ Hardware SPI by arduino                 **
+ **  Created by ElecFreaks. Robi.W,11 June 2011                      **
+ **                                                                  **
+ **  http://www.elecfreaks.com                                       **
+ **                                                                  **
+ **   SPI-compatible                                                 **
+ **   CS - to digital pin 3               - preto                    **
+ **   CSN - to digital pin 4  (SS pin)    - marrom                   **
+ **   MOSI - to digital pin 11 (MOSI pin) - laranja                  **
+ **   MISO - to digital pin 12 (MISO pin) - amarelo                  **
+ **   CLK - to digital pin 13 (SCK pin)   - vermelho                 **
+ *********************************************************************/
+//**************************************************
+// Function: init_io();
+// Description:
+// flash led one time,chip enable(ready to TX or RX Mode),
+// Spi disable,Spi clock line init high
+//**************************************************
+void init_io(void) {
+  digitalWrite(IRQ, 0);
+  digitalWrite(CE, 0);      // chip enable
+  digitalWrite(CSN, 1);                 // Spi disable
+}
+
+/************************************************************************
+ **   * Function: SPI_RW();
+ *
+ * Description:
+ * Writes one unsigned char to nRF24L01, and return the unsigned char read
+ * from nRF24L01 during write, according to SPI protocol
+ ************************************************************************/
+unsigned char SPI_RW(unsigned char Byte) {
+  return SPI.transfer(Byte);
+}
+
+/**************************************************/
+
+/**************************************************
+ * Function: SPI_RW_Reg();
+ *
+ * Description:
+ * Writes value 'value' to register 'reg'
+ /**************************************************/
+unsigned char SPI_RW_Reg(unsigned char reg, unsigned char value) {
+  unsigned char status;
+
+  digitalWrite(CSN, 0);                   // CSN low, init SPI transaction
+  SPI_RW(reg);                            // select register
+  SPI_RW(value);                          // ..and write value to it..
+  digitalWrite(CSN, 1);                   // CSN high again
+
+  return (status);                   // return nRF24L01 status unsigned char
+}
+/**************************************************/
+
+/**************************************************
+ * Function: SPI_Read();
+ *
+ * Description:
+ * Read one unsigned char from nRF24L01 register, 'reg'
+ /**************************************************/
+unsigned char SPI_Read(unsigned char reg) {
+  unsigned char reg_val;
+
+  digitalWrite(CSN, 0);                // CSN low, initialize SPI communication...
+  SPI_RW(reg);                         // Select register to read from..
+  reg_val = SPI_RW(0);                 // ..then read register value
+  digitalWrite(CSN, 1);                // CSN high, terminate SPI communication
+
+  return (reg_val);                     // return register value
+}
+/**************************************************/
+
+/**************************************************
+ * Function: SPI_Read_Buf();
+ *
+ * Description:
+ * Reads 'unsigned chars' #of unsigned chars from register 'reg'
+ * Typically used to read RX payload, Rx/Tx address
+ /**************************************************/
+unsigned char SPI_Read_Buf(unsigned char reg, unsigned char *pBuf, unsigned char bytes) {
+  unsigned char sstatus, i;
+
+  digitalWrite(CSN, 0);                   // Set CSN low, init SPI tranaction
+  sstatus = SPI_RW(reg);            // Select register to write to and read status unsigned char
+
+  for (i = 0; i < bytes; i++) {
+    pBuf[i] = SPI_RW(0);    // Perform SPI_RW to read unsigned char from nRF24L01
+  }
+
+  digitalWrite(CSN, 1);                   // Set CSN high again
+
+  return (sstatus);                  // return nRF24L01 status unsigned char
+}
+/**************************************************/
+
+/**************************************************
+ * Function: SPI_Write_Buf();
+ *
+ * Description:
+ * Writes contents of buffer '*pBuf' to nRF24L01
+ * Typically used to write TX payload, Rx/Tx address
+ /**************************************************/
+unsigned char SPI_Write_Buf(unsigned char reg, unsigned char *pBuf, unsigned char bytes) {
+  unsigned char sstatus, i;
+
+  digitalWrite(CSN, 0);                   // Set CSN low, init SPI tranaction
+  sstatus = SPI_RW(reg);             // Select register to write to and read status unsigned char
+  for (i = 0; i < bytes; i++) {          // then write all unsigned char in buffer(*pBuf)
+    SPI_RW(*pBuf++);
+  }
+  digitalWrite(CSN, 1);                   // Set CSN high again
+  return (sstatus);                  // return nRF24L01 status unsigned char
+}
+/**************************************************/
+
+void RX_Mode(void) {
+  digitalWrite(CE, 0);
+
+  SPI_Write_Buf(WRITE_REG + TX_ADDR, TX_ADDRESS, TX_ADR_WIDTH);    // Writes TX_Address to nRF24L01
+  SPI_Write_Buf(WRITE_REG + RX_ADDR_P0, TX_ADDRESS, TX_ADR_WIDTH); // RX_Addr0 same as TX_Adr for Auto.Ack
+
+  SPI_RW_Reg(WRITE_REG + EN_AA, 0x01);      // Enable Auto.Ack:Pipe0
+  SPI_RW_Reg(WRITE_REG + EN_RXADDR, 0x01);  // Enable Pipe0
+  SPI_RW_Reg(WRITE_REG + RF_CH, 'R');        // Select RF channel 40
+  SPI_RW_Reg(WRITE_REG + RX_PW_P0, TX_PLOAD_WIDTH); // Select same RX payload width as TX Payload width
+  SPI_RW_Reg(WRITE_REG + RF_SETUP, 0x07);   // TX_PWR:0dBm, Datarate:2Mbps, LNA:HCURR
+  SPI_RW_Reg(WRITE_REG + CONFIG, 0x0f);     // Set PWR_UP bit, enable CRC(2 unsigned chars) & Prim:RX. RX_DR enabled..
+
+  SPI_RW_Reg(WRITE_REG + FEATURE, 6);       //Enables Dynamic Payload Length e Payload with ACK
+  SPI_RW_Reg(WRITE_REG + DYNPD, 1);
+
+  SPI_Write_Buf(WR_TX_PLOAD, tx_buf, TX_PLOAD_WIDTH);
+
+  digitalWrite(CE, 1);                             // Set CE pin high to enable RX device
+  //  This device is now ready to receive one packet of 16 unsigned chars payload from a TX device sending to address
+  //  '3443101001', with auto acknowledgment, retransmit count of 10, RF channel 40 and datarate = 2Mbps.
+}
+
