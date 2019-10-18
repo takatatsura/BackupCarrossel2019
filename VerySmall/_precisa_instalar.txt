@@ -1,0 +1,13 @@
+Para compilar é necessário ter os pacotes libusb-1.0, gtkmm e cairomm, uma vez que isto estiver instalado, faça os passos abaixo no Eclipse:
+
+Adicionar `pkg-config gtkmm-2.4 --cflags` (incluindo os apostrofes) no Project/Properties/C C++ Builder/Settings/C++ Compiler/Misc/Other flags.
+
+Adicionar `pkg-config gtkmm-2.4 --libs` no  Project/Properties/C C++ Builder/Settings/C++ Linker/Misc/Linker flags.
+
+Editar  Project/Properties/C C++ Builder/Settings/C++ Linker/"Command line pattern" movendo o texto "${FLAGS}" para o fim da linha.
+
+Use toolchain: Linux GCC and Gnu Make Builder
+
+No "Binary Parsers" ative "PE Windows Parser"
+
+Desligue todos os itens em Window/Preference/C C++/Code Analysis.
